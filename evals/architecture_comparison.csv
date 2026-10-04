@@ -1,0 +1,5 @@
+metric,single,staged
+cases_passing,6,6
+avg_latency_ms,7.266666666666667,7.583333333333334
+avg_llm_calls,0.0,0.0
+avg_tool_calls,4.0,4.0
