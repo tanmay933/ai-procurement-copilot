@@ -442,13 +442,10 @@ Current result:
 
 The test suite covers:
 
-- data integrity
-- mock vendor API behavior
-- deterministic tools
-- policy engine
-- security/prompt-injection handling
-- LLM behavior
-- single-agent decision flow
+tests/
+├── test_data_integrity.py
+├── test_mock_api.py
+└── test_solution.py
 
 ---
 
@@ -487,6 +484,7 @@ The test suite covers:
 │   │
 │   ├── agents/
 │   │   └── single_agent.py
+│   │   └── staged.py
 │   │
 │   └── tools/
 │       ├── base.py
