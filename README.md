@@ -8,9 +8,29 @@ An evidence-first internal procurement copilot for software/SaaS requests.
 ![Tests](https://img.shields.io/badge/Tests-15%20passed-brightgreen?style=flat-square)
 ![Status](https://img.shields.io/badge/status-shipped-blue?style=flat-square)
 
-> An evidence-first internal procurement copilot for software/SaaS requests.
+The system gathers evidence from deterministic tools, applies procurement and security controls in code, optionally uses an LLM to interpret the evidence and write the recommendation, and keeps sensitive approval decisions with humans. It never approves or purchases anything automatically.
 
-The system gathers evidence from deterministic tools, applies procurement and security controls in code, optionally uses an LLM to interpret the evidence and formulate a recommendation, and keeps sensitive approval decisions with humans.
+---
+
+## Table of Contents
+
+1. [What It Does](#what-it-does)
+2. [Quick Start](#quick-start)
+3. [Product Workflow](#product-workflow)
+4. [Architecture](#architecture)
+5. [Tools](#tools)
+6. [Deterministic Controls](#deterministic-policy-and-safety-controls)
+7. [Prompt Injection Defense](#prompt-injection-defense)
+8. [Structured Output](#structured-output)
+9. [Human-in-the-Loop](#human-in-the-loop)
+10. [Evaluation](#evaluation)
+11. [Architecture Comparison](#architecture-comparison)
+12. [Final Ship Decision](#final-ship-decision)
+13. [Tests](#test-suite)
+14. [Project Structure](#project-structure)
+15. [Assumptions](#assumptions)
+16. [Known Limitations](#known-limitations)
+17. [Security](#security)
 
 ---
 
@@ -29,7 +49,7 @@ Given a procurement request, the copilot:
 9. Produces a structured procurement decision.
 10. Escalates sensitive approvals and exceptions to a human.
 
-The system never approves or purchases software automatically.
+**Required output fields:** `recommendation` · `evidence` · `required_approvals` · `missing_information` · `risk_flags` · `next_step` (plus `human_review_required` and `telemetry`).
 
 ---
 
@@ -48,7 +68,7 @@ source .venv/bin/activate
 python3 -m pip install -r requirements.txt
 ```
 
-### 3. Run the setup verification
+### 3. Verify the setup
 
 ```bash
 python3 verify_setup.py
@@ -60,9 +80,9 @@ python3 verify_setup.py
 cp .env.example .env
 ```
 
-The application works without an LLM API key using deterministic fallback behavior.
+The app works **without** an API key using deterministic fallback behaviour (`LLM_PROVIDER=none`).
 
-For Gemini:
+Gemini:
 
 ```env
 LLM_PROVIDER=gemini
@@ -70,7 +90,7 @@ LLM_MODEL=gemini-2.5-flash
 GEMINI_API_KEY=your_key_here
 ```
 
-For OpenRouter:
+OpenRouter:
 
 ```env
 LLM_PROVIDER=openrouter
@@ -80,189 +100,113 @@ OPENROUTER_API_KEY=your_key_here
 
 Never commit `.env` or API keys.
 
-### 5. Start the application
+### 5. Start the app (one command)
 
 ```bash
 python3 run_local.py
 ```
 
-The Streamlit application is available at:
+This starts the vendor-risk mock API on `http://127.0.0.1:8001` and the Streamlit UI on:
 
 ```text
 http://127.0.0.1:8501
 ```
 
+Press `Ctrl+C` to stop both.
+
 ---
 
 ## Product Workflow
 
-```text
-                    Procurement Request
-                            |
-                            v
-                Intake + Input Validation
-                            |
-                            v
-                  Prompt Injection Guard
-                            |
-                            v
-        +-----------------------------------------+
-        |             Evidence Tools              |
-        |                                         |
-        |  Budget   Software   Vendor Risk   Policy|
-        +-----------------------------------------+
-                            |
-                            v
-              Deterministic Policy Engine
-                            |
-                            v
-                 LLM Interpretation
-                            |
-                            v
-                 Safety / Policy Merge
-                            |
-                            v
-              Structured ProcurementDecision
-                            |
-                            v
-              Human Review / Approval
+```mermaid
+flowchart TD
+    A[Procurement Request] --> B[Intake + Validation]
+    B --> C[Prompt Injection Guard]
+    C --> D
+
+    subgraph D[Evidence Tools - deterministic]
+        D1[budget_tool]
+        D2[software_tool]
+        D3[vendor_tool]
+        D4[policy_tool]
+    end
+
+    D --> E[Deterministic Policy Engine]
+    E --> F[LLM Interpretation<br/>single agent OR analyst + reviewer]
+    F --> G[Safety / Policy Merge<br/>code-owned]
+    G --> H[ProcurementDecision]
+    H --> I[Human Review / Approval]
+
+    V[(Vendor-risk mock API)] -. HTTP .-> D3
 ```
 
-The core design principle is:
+### Responsibility split
 
-```text
-AI       = interpret context + recommend
-CODE     = evidence gathering + policy + thresholds + safety controls
-HUMAN    = sensitive approvals + exceptions
-```
+| Layer | Owns |
+|---|---|
+| **AI** | Interpret context, write the recommendation and next step |
+| **Code** | Evidence gathering, thresholds, policy rules, risk flags, approvals, missing info, safety merge |
+| **Human** | Sensitive approvals and exceptions |
 
 ---
 
 # Architecture
 
-## Architecture A — Single Agent
+## Architecture A — Single Agent (default)
 
-The single-agent architecture performs one reasoning pass after deterministic evidence collection and policy evaluation.
+One LLM reasoning pass after deterministic evidence collection and policy evaluation.
 
-```text
-Request
-  |
-  v
-Evidence Tools
-  |
-  v
-Policy Engine
-  |
-  v
-Single LLM Reasoning Pass
-  |
-  v
-Safety Merge
-  |
-  v
-ProcurementDecision
+```mermaid
+flowchart LR
+    R[Request] --> T[Evidence Tools] --> P[Policy Engine] --> L[Single LLM Pass] --> M[Safety Merge] --> D[ProcurementDecision]
 ```
 
-The model can interpret evidence and formulate the recommendation and next step.
-
-The model cannot override deterministic controls.
-
-Code remains authoritative for:
-
-- approval requirements
-- risk flags
-- missing information
-- evidence
-- human review
-- policy thresholds
-
-This is the default architecture.
-
----
+The model interprets evidence and proposes the recommendation and next step. It cannot override code-owned fields: approvals, risk flags, missing information, evidence, human-review status, and thresholds.
 
 ## Architecture B — Staged / Two-Agent
 
-The staged architecture separates reasoning into an analyst and reviewer.
+An analyst produces an initial recommendation; a reviewer sees the same evidence plus the analyst output.
 
-```text
-Request
-  |
-  v
-Evidence Tools
-  |
-  v
-Policy Engine
-  |
-  v
-Analyst Agent
-  |
-  v
-Reviewer Agent
-  |
-  v
-Safety Merge
-  |
-  v
-ProcurementDecision
+```mermaid
+flowchart LR
+    R[Request] --> T[Evidence Tools] --> P[Policy Engine] --> A[Analyst Agent] --> V[Reviewer Agent] --> M[Safety Merge] --> D[ProcurementDecision]
 ```
 
-The analyst produces an initial recommendation.
+The reviewer can accept the recommendation, make it more conservative, or raise additional concerns. It cannot remove deterministic controls. The final safety merge is code-owned, identical to Architecture A.
 
-The reviewer receives the same evidence and analyst output and can:
+### A vs B at a glance
 
-- accept the recommendation
-- request a more conservative recommendation
-- identify additional concerns
-
-The reviewer cannot remove deterministic policy controls.
-
-The final safety merge remains code-owned.
+| | A — Single agent | B — Staged (2 agents) |
+|---|---|---|
+| LLM calls per request (LLM enabled) | 1 | 2 |
+| Evidence tools | Same 4 | Same 4 |
+| Policy engine + safety merge | Same | Same |
+| Output contract | `ProcurementDecision` | `ProcurementDecision` |
+| Failure surface | Smaller | Larger (two model hops) |
 
 ---
 
 # Tools
 
-The system uses four evidence tools.
+Four evidence tools; three are fully deterministic and one calls the mock vendor service.
 
-### `budget_tool`
-
-Deterministically checks the requesting department's available software budget against the requested annual cost.
-
-### `software_tool`
-
-Checks the approved software catalog for existing or relevant alternatives.
-
-This supports the requirement to avoid recommending a new purchase when an existing approved tool may satisfy the use case.
-
-### `vendor_tool`
-
-Combines internal vendor registry information with the mock vendor-risk service.
-
-It handles:
-
-- procurement status
-- security status
-- legal status
-- vendor review dates
-- conflicting vendor evidence
-- unavailable vendor-risk service
-
-### `policy_tool`
-
-Exposes the procurement policy and reference date used by the deterministic policy engine.
+| Tool | Type | What it does |
+|---|---|---|
+| `budget_tool` | Deterministic | Compares the department's available software budget with the requested annual cost |
+| `software_tool` | Deterministic | Searches the approved catalog for existing/overlapping tools so a new purchase isn't recommended when one already fits |
+| `vendor_tool` | Deterministic + HTTP | Merges the internal vendor registry with the vendor-risk service: procurement, security and legal status, review dates, conflicting evidence, API unavailability |
+| `policy_tool` | Deterministic | Exposes the procurement policy and reference date used by the policy engine |
 
 ---
 
 # Deterministic Policy and Safety Controls
 
-Safety-critical decisions are not delegated to the LLM.
-
-The deterministic policy layer handles:
+Safety-critical decisions are not delegated to the LLM. The code layer handles:
 
 - budget thresholds
 - approval requirements
 - security-sensitive requests
-- privacy/legal requirements
+- privacy / legal requirements
 - vendor review expiry
 - missing information
 - existing software alternatives
@@ -270,165 +214,162 @@ The deterministic policy layer handles:
 - conflicting vendor information
 - human-review requirements
 
-The model cannot reduce the policy floor.
-
-For example, if code determines that security review is required, the LLM cannot remove that requirement from the final decision.
+The model cannot reduce the policy floor. If code decides security review is required, the LLM cannot remove it from the final decision.
 
 ---
 
 # Prompt Injection Defense
 
-Business data and vendor/request text are treated as untrusted data.
+Request, business and vendor text is treated as **untrusted data**, never as instructions.
 
-Instruction-like content inside procurement data is not treated as an instruction to the agent.
-
-The system:
-
-1. Detects prompt-injection-like content.
-2. Keeps the content in the evidence/data context.
-3. Does not execute instructions embedded inside business data.
-4. Preserves deterministic policy controls.
-5. Escalates when the request remains ambiguous or unsafe.
+1. Prompt-injection-like content is detected (`prompt_injection_detected` risk flag).
+2. The content stays in the data/evidence context only.
+3. Embedded instructions are never executed.
+4. Deterministic policy controls are unaffected.
+5. Ambiguous or unsafe requests are escalated and clarification is requested.
 
 ---
 
 # Structured Output
 
-The final response is represented using the `ProcurementDecision` contract.
+Every response follows the `ProcurementDecision` contract:
 
-The decision contains:
-
-- recommendation
-- evidence
-- approvals required
-- missing information
-- risk flags
-- next step
-- human review status
-
-Evidence is generated from tool results rather than invented by the model.
+| Field | Source |
+|---|---|
+| `recommendation` | LLM (or deterministic fallback) |
+| `evidence` | Generated from tool results, not by the model |
+| `required_approvals` | Code |
+| `missing_information` | Code |
+| `risk_flags` | Code |
+| `next_step` | LLM (or deterministic fallback) |
+| `human_review_required` | Code |
+| `telemetry` | Code (latency, LLM calls, tool calls) |
 
 ---
 
 # Human-in-the-Loop
 
-The copilot is advisory.
-
-Human review is required for sensitive approvals and exceptions.
-
-The system does not:
-
-- approve purchases
-- authorize spending
-- bypass security review
-- bypass procurement policy
-- automatically onboard vendors
-- make irreversible procurement decisions
-
-The final action remains with the appropriate human approver.
+The copilot is advisory. It does not approve purchases, authorize spending, bypass security review or procurement policy, onboard vendors, or make irreversible decisions. Final action stays with the appropriate human approver.
 
 ---
 
 # Evaluation
 
-Both architectures are evaluated against the same public evaluation set.
-
-Run:
+Both architectures run on the **same** test set through the same harness.
 
 ```bash
 python3 evals/run_public_evals.py --architecture single
-```
-
-and:
-
-```bash
 python3 evals/run_public_evals.py --architecture staged
+python3 evals/compare_architectures.py        # runs both, writes evals/architecture_comparison.csv
 ```
 
-Results are written to:
+Per-run results are written to `evals/results_single.csv` and `evals/results_staged.csv` (git-ignored; regenerate with the commands above). The committed summary is `evals/architecture_comparison.csv`.
 
-```text
-evals/results_single.csv
-evals/results_staged.csv
-```
+### What the harness checks
 
-## Public Evaluation Results
+- `ProcurementDecision` schema validity
+- required approvals present
+- required / forbidden risk flags
+- minimum evidence items
+- missing-information limits
+- human-review flag
+- end-to-end latency, LLM call count, tool call count
 
-### Deterministic / fallback evaluation
+### Public cases (6)
 
-| Architecture | Public cases | Result |
-|---|---:|---:|
-| Single agent | 6 | 6/6 PASS |
-| Staged / 2-agent | 6 | 6/6 PASS |
+| Case | Request | Edge case covered |
+|---|---|---|
+| PUB-01 | REQ-1001 | Low-value approved vendor, basic approval threshold |
+| PUB-02 | REQ-1002 | Existing alternatives + new vendor |
+| PUB-03 | REQ-1003 | Security-sensitive request (source-code access) |
+| PUB-04 | REQ-1005 | Budget shortfall + new sensitive vendor |
+| PUB-05 | REQ-1006 | Incomplete request + prompt injection |
+| PUB-06 | REQ-1009 | Vendor-risk API unavailable |
 
-### Gemini evaluation
+### Additional coverage — all 10 dataset requests
 
-The same six public cases were evaluated with Gemini enabled.
+Beyond the public cases, both architectures were run on every request in `data/requests.json` (REQ-1001 … REQ-1010), including the remaining requests not in the public set (REQ-1004, 1007, 1008, 1010), which cover conflicting/expired vendor evidence and overlap cases.
 
-| Architecture | Public cases | Result |
-|---|---:|---:|
-| Single agent | 6 | 6/6 PASS |
-| Staged / 2-agent | 6 | 6/6 PASS |
-
-### Gemini latency observed
-
-Single-agent runs:
-
-| Case | Latency |
+| Result (deterministic mode) | Value |
 |---|---:|
-| PUB-01 | 3246 ms |
-| PUB-02 | 3280 ms |
-| PUB-03 | 4062 ms |
-| PUB-04 | 3514 ms |
-| PUB-05 | 4417 ms |
-| PUB-06 | 2546 ms |
-
-Staged runs:
-
-| Case | Latency |
-|---|---:|
-| PUB-01 | 10244 ms |
-| PUB-02 | 8580 ms |
-| PUB-03 | 7179 ms |
-| PUB-04 | 416 ms |
-| PUB-05 | 426 ms |
-| PUB-06 | 424 ms |
-
-Both architectures achieved 6/6 correctness on the shared public evaluation set.
-
-The single-agent architecture showed lower and more predictable latency on the evaluated cases while achieving the same correctness.
+| Requests run | 10 |
+| Crashes / errors | 0 |
+| Single vs staged: same recommendation | 10 / 10 |
 
 ---
 
-# Architecture Decision
+# Architecture Comparison
 
-## Ship the Single-Agent Architecture
+### Deterministic / fallback mode (no LLM)
 
-The single-agent architecture is the final recommended architecture.
+From `evals/architecture_comparison.csv`:
 
-Both architectures achieved 6/6 on the same public evaluation set, so the staged architecture did not demonstrate an accuracy advantage sufficient to justify its additional orchestration.
+| Metric | Single | Staged |
+|---|---:|---:|
+| Public cases passing | 6 / 6 | 6 / 6 |
+| Avg latency (ms) | ~7.3 | ~7.6 |
+| Avg LLM calls | 0 | 0 |
+| Avg tool calls | 4 | 4 |
 
-The single-agent design provides:
+With no LLM the two architectures run identical code paths, so this mode confirms the shared pipeline is correct but cannot separate them.
 
-- the same evaluated correctness
-- fewer reasoning stages
-- lower implementation complexity
-- a smaller failure surface
-- easier debugging
-- easier observability
-- lower and more predictable latency in the measured evaluation
+### Gemini enabled (`gemini-2.5-flash`)
 
-The staged architecture remains implemented as an experimental comparison baseline.
+| Metric | Single | Staged |
+|---|---:|---:|
+| Public cases passing | 6 / 6 | 6 / 6 |
+| LLM calls per request (by design) | 1 | 2 |
+| Tool calls per request | 4 | 4 |
+| Avg latency, all 6 cases (ms) | ~3,511 | ~4,545 |
+| Avg latency, PUB-01 to PUB-03 (ms) | ~3,529 | ~8,668 |
 
-The final system therefore follows the principle:
+Per-case latency:
 
-> Use the simplest architecture that performs as well or better while keeping safety-critical decisions deterministic.
+| Case | Single (ms) | Staged (ms) |
+|---|---:|---:|
+| PUB-01 | 3246 | 10244 |
+| PUB-02 | 3280 | 8580 |
+| PUB-03 | 4062 | 7179 |
+| PUB-04 | 3514 | 416 |
+| PUB-05 | 4417 | 426 |
+| PUB-06 | 2546 | 424 |
+
+Staged PUB-04 to PUB-06 (~420 ms) are far faster than the other staged runs and consistent with the deterministic fallback path rather than a full two-call LLM round trip. The like-for-like latency comparison is therefore PUB-01 to PUB-03, where the staged variant is roughly **2.5× slower** for the same 6/6 correctness.
+
+### Summary
+
+| Criterion | Single | Staged | Winner |
+|---|---|---|---|
+| Correct recommendation / next action | 6/6 | 6/6 | Tie |
+| Evidence grounded in tool results | Yes (code-generated) | Yes (code-generated) | Tie |
+| Policy + deterministic rules followed | Yes | Yes | Tie |
+| Escalation / human review correct | Yes | Yes | Tie |
+| LLM calls | 1 | 2 | Single |
+| Latency (like-for-like cases) | ~3.5 s | ~8.7 s | Single |
+| Complexity / failure surface | Lower | Higher | Single |
+
+---
+
+# Final Ship Decision
+
+## Ship the Single-Agent architecture
+
+Both architectures score the same on correctness, grounding, policy compliance and escalation, because those are enforced by code and shared by both. The second agent therefore adds cost without adding measurable quality:
+
+- same evaluated correctness (6/6 public, 10/10 agreement on all dataset requests)
+- half the LLM calls (1 vs 2)
+- roughly 2.5× lower latency on like-for-like Gemini runs
+- smaller failure surface, easier debugging and observability
+
+> A simpler system that performs as well or better is a stronger answer than unnecessary orchestration.
+
+The staged architecture stays in the repo as a comparison baseline. It would become worth shipping only if a larger evaluation set showed a real quality gain that justified the extra latency and complexity.
+
+The full memo is in [`docs/architecture_decision.md`](docs/architecture_decision.md); the system design is in [`docs/architecture.md`](docs/architecture.md).
 
 ---
 
 # Test Suite
-
-Run:
 
 ```bash
 python3 -m pytest -q
@@ -440,12 +381,11 @@ Current result:
 15 passed
 ```
 
-The test suite covers:
-
-tests/
-├── test_data_integrity.py
-├── test_mock_api.py
-└── test_solution.py
+| File | Covers |
+|---|---|
+| `tests/test_data_integrity.py` | Starter data files load and are internally consistent |
+| `tests/test_mock_api.py` | Vendor-risk mock service endpoints and failure behaviour |
+| `tests/test_solution.py` | End-to-end `handle_request` output contract for both architectures |
 
 ---
 
@@ -453,13 +393,14 @@ tests/
 
 ```text
 .
-├── app.py
-├── run_local.py
+├── app.py                      # Streamlit UI
+├── run_local.py                # One-command start (mock API + UI)
 ├── verify_setup.py
 ├── requirements.txt
 ├── .env.example
 │
 ├── data/
+│   ├── README.md
 │   ├── department_budgets.csv
 │   ├── employees.csv
 │   ├── procurement_policy.md
@@ -470,21 +411,24 @@ tests/
 │   └── vendors.csv
 │
 ├── src/
-│   ├── contracts.py
+│   ├── contracts.py            # ProcurementDecision schema
+│   ├── config.py
 │   ├── data_access.py
-│   ├── decision.py
+│   ├── decision.py             # Safety merge
 │   ├── intake.py
 │   ├── llm.py
 │   ├── pipeline.py
 │   ├── policy_engine.py
 │   ├── prompts.py
-│   ├── security.py
-│   ├── solution.py
+│   ├── security.py             # Prompt-injection guard
+│   ├── solution.py             # handle_request entry point
 │   ├── telemetry.py
+│   ├── vendor_client.py
+│   ├── sample_output.json
 │   │
 │   ├── agents/
-│   │   └── single_agent.py
-│   │   └── staged.py
+│   │   ├── single_agent.py     # Architecture A
+│   │   └── staged.py           # Architecture B
 │   │
 │   └── tools/
 │       ├── base.py
@@ -494,21 +438,24 @@ tests/
 │       └── vendor.py
 │
 ├── evals/
+│   ├── README.md
 │   ├── public_cases.json
 │   ├── run_public_evals.py
-│   └── README.md
+│   ├── compare_architectures.py
+│   └── architecture_comparison.csv
 │
 ├── mock_api/
-│   └── app.py
+│   └── app.py                  # Vendor-risk service
 │
 ├── tests/
 │   ├── test_data_integrity.py
 │   ├── test_mock_api.py
-│   ├── test_policy_engine.py
-│   ├── test_security.py
-│   ├── test_single_agent.py
-│   ├── test_tools.py
-│   └── test_llm.py
+│   └── test_solution.py
+│
+├── docs/
+│   ├── architecture.md
+│   ├── architecture_decision.md   # Decision memo
+│   └── Assignment_3_Brief.pdf
 │
 └── templates/
     ├── architecture_decision.md
@@ -522,70 +469,36 @@ tests/
 
 - The supplied procurement policy is the source of truth for deterministic controls.
 - The policy reference date is `2026-09-30`.
-- The mock vendor-risk service represents an external vendor/security dependency.
-- Vendor-risk failures are not silently interpreted as approval.
-- Missing information is surfaced rather than inferred.
-- LLM output is advisory and is validated before becoming part of the final decision.
-- Human approval remains mandatory for sensitive procurement actions.
+- The mock vendor-risk service stands in for an external vendor/security dependency.
+- A vendor-risk failure is never interpreted as approval; it raises `vendor_risk_unavailable` and escalates.
+- Missing information is surfaced, never inferred.
+- LLM output is advisory and validated before it becomes part of the final decision.
+- Human approval is mandatory for sensitive procurement actions.
 
 ---
 
-# Limitations
+# Known Limitations
 
 - The vendor-risk service is a mock dependency.
 - LLM quality depends on the configured provider/model.
-- Public evaluation coverage is limited to the supplied evaluation set.
-- Latency depends on the external LLM provider.
-- The system is a procurement recommendation prototype rather than a production procurement system.
-- No real purchasing or approval action is performed.
+- Evaluation is small: 6 public cases plus the 10 dataset requests; hidden cases use different records and values.
+- Pass/fail checks are minimum expectations (schema, approvals, flags, evidence counts), not a human-graded quality score for recommendation wording.
+- Gemini latency numbers are single runs and vary with provider load; some staged runs completed far faster than expected (see comparison above).
+- Prompt-injection detection is pattern-based and will not catch every phrasing.
+- This is a recommendation prototype, not a production procurement system. No real purchase or approval action is performed.
 
 ---
 
 # Security
 
-Never commit secrets.
-
-The local `.env` file is ignored by Git.
-
-Before pushing:
-
-```bash
-git status
-```
-
-Verify that `.env` does not appear in the files staged for commit.
-
-Use `.env.example` as the safe configuration template.
-
----
-
-# Final Ship Summary
-
-The final MVP ships the **single-agent architecture** with:
-
-- deterministic evidence tools
-- deterministic procurement policy enforcement
-- prompt-injection defenses
-- structured decision output
-- human approval gates
-- optional Gemini/OpenRouter reasoning
-- staged architecture retained for evaluation
-- reproducible public evaluation
-- automated tests
-
-The system prioritizes grounded evidence, deterministic controls, and human oversight over unnecessary agent complexity.
-
----
-
-## Notes
-
-- All commands use `python3` to match the local environment.
-- The `.env` file must never be committed.
-- Code fences, tables, and headings have been checked for valid GitHub Markdown rendering.
+- `.env` is git-ignored; use `.env.example` as the template.
+- No API keys are stored in the repository.
+- Before pushing, run `git status` and confirm `.env` is not staged.
 
 ---
 
 ## Author
 
 **Tanmay Mittal**
+
 Roll No.: **24BCS10491**
